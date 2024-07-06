@@ -1,0 +1,5 @@
+{
+    "files.associations": {
+        "rtos_kernel_cfg.h": "c"
+    }
+}
