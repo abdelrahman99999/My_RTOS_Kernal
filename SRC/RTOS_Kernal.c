@@ -1,50 +1,35 @@
 #include <stdint.h>
-#include "RTOS_Kernel.h"
-#include "support.h"
-#include "under_the_hood.h"
-#include "under_the_hood_cfg.h"
-#include "RTOS_Kernel_cfg.h"
-//#include "TM4C123GH6PM.h"
+#include "RTOS_Kernal.h"
+#include "qassert.h"
 
-static OSThread * volatile OS_Current_Thread; /* pointer to the current thread */
-static OSThread * volatile OS_Next_Thread; /* pointer to the next thread to run */
+Q_DEFINE_THIS_FILE
 
-static OSThread *OS_thread[MAX_NO_THREADS + 1]; /* array of threads started so far */
-static uint32_t OS_readySet; /* bitmask of threads that are ready to run */
-static uint32_t OS_delayedSet; /* bitmask of threads that are delayed(blocked) */
+OSThread * volatile OS_curr; /* pointer to the current thread */
+OSThread * volatile OS_next; /* pointer to the next thread to run */
 
-static uint32_t stack_idleThread[STACK_SIZE_FOR_IDLE_TASK];
+OSThread *OS_thread[32 + 1]; /* array of threads started so far */
+uint32_t OS_readySet; /* bitmask of threads that are ready to run */
+uint32_t OS_delayedSet; /* bitmask of threads that are delayed */
 
-static OSThread idleThread;
+//__builtin_clz It counts number of zeros before the first occurrence of one(set bit)
+#define LOG2(x) (32U - __builtin_clz(x))
 
-static void idle(){
-#if RTOS_DEBUG == 1U
-		
-    DIO_Set(TEST_PIN_1);
-		
-		DIO_Reset(TEST_PIN_1);
-
-#endif
-		
-}
+OSThread idleThread;
 void main_idleThread() {
     while (1) {
-			idle();
-			//__WFI(); /* stop the CPU and Wait for Interrupt */
+        OS_onIdle();
     }
 }
 
-void OS_init() {
+void OS_init(void *stkSto, uint32_t stkSize) {
     /* set the PendSV interrupt priority to the lowest level 0xFF */
     *(uint32_t volatile *)0xE000ED20 |= (0xFFU << 16);
-
-    Set_SysticHandlerCallbacks(OS_tick,OS_sched);
 
     /* start idleThread thread */
     OSThread_start(&idleThread,
                    0U, /* idle thread priority */
                    &main_idleThread,
-                   stack_idleThread, sizeof(stack_idleThread));
+                   stkSto, stkSize);
 }
 
 void OS_sched(void) {
@@ -54,14 +39,13 @@ void OS_sched(void) {
         next = OS_thread[0]; /* the idle thread */
     }
     else {
-        next = OS_thread[GET_NEXT_THREAD(OS_readySet)];
-        ASSERT(next != (OSThread *)0);
-				
+        next = OS_thread[LOG2(OS_readySet)];
+        Q_ASSERT(next != (OSThread *)0);
     }
 
     /* trigger PendSV, if needed */
-    if (next != OS_Current_Thread) {
-        OS_Next_Thread = next;
+    if (next != OS_curr) {
+        OS_next = next;
         *(uint32_t volatile *)0xE000ED04 = (1U << 28);
     }
 }
@@ -70,22 +54,21 @@ void OS_run(void) {
     /* callback to configure and start interrupts */
     OS_onStartup();
 
-    INT_DISABLE();
+    __asm volatile ("cpsid i");
     OS_sched();
-    INT_ENABLE();
+    __asm volatile ("cpsie i");
 
     /* the following code should never execute */
-    ASSERT(0);
+    Q_ERROR();
 }
 
 void OS_tick(void) {
     uint32_t workingSet = OS_delayedSet;
     while (workingSet != 0U) {
-        OSThread *t = OS_thread[GET_NEXT_THREAD(workingSet)];
+        OSThread *t = OS_thread[LOG2(workingSet)];
         uint32_t bit;
-				
-        uint8_t cond = (((t != (OSThread *)0) && (t->timeout != 0U)));
-				ASSERT(cond);
+        Q_ASSERT((t != (OSThread *)0) && (t->timeout != 0U));
+
         bit = (1U << (t->prio - 1U));
         --t->timeout;
         if (t->timeout == 0U) {
@@ -98,17 +81,17 @@ void OS_tick(void) {
 
 void OS_delay(uint32_t ticks) {
     uint32_t bit;
-   INT_DISABLE();
+    __asm volatile ("cpsid i");
 
     /* never call OS_delay from the idleThread */
-    ASSERT(OS_Current_Thread != OS_thread[0]);
+    Q_REQUIRE(OS_curr != OS_thread[0]);
 
-    OS_Current_Thread->timeout = ticks;
-    bit = (1U << (OS_Current_Thread->prio - 1U));
+    OS_curr->timeout = ticks;
+    bit = (1U << (OS_curr->prio - 1U));
     OS_readySet &= ~bit;
     OS_delayedSet |= bit;
     OS_sched();
-    INT_ENABLE();
+    __asm volatile ("cpsie i");
 }
 
 void OSThread_start(
@@ -126,7 +109,8 @@ void OSThread_start(
     /* priority must be in ragne
     * and the priority level must be unused
     */
-    ASSERT((prio < MAX_NO_THREADS) && (OS_thread[prio] == (OSThread *)0));
+    Q_REQUIRE((prio < Q_DIM(OS_thread))
+              && (OS_thread[prio] == (OSThread *)0));
 
     *(--sp) = (1U << 24);  /* xPSR */
     *(--sp) = (uint32_t)threadHandler; /* PC */
@@ -166,40 +150,68 @@ void OSThread_start(
     }
 }
 
+/* inline assembly syntax for Compiler 6 (ARMCLANG) */
 __attribute__ ((naked))
 void PendSV_Handler(void) {
 __asm volatile (
     /* __disable_irq(); */
     "  CPSID         I                 \n"
 
-    /* if (OS_Current_Thread != (OSThread *)0) { */
-    "  LDR           r1,=OS_Current_Thread       \n"
+    /* if (OS_curr != (OSThread *)0) { */
+    "  LDR           r1,=OS_curr       \n"
     "  LDR           r1,[r1,#0x00]     \n"
-    "  CBZ           r1,PendSV_restore \n"
+    "  CMP           r1,#0             \n"
+    "  BEQ           PendSV_restore    \n"
 
     /*     push registers r4-r11 on the stack */
+#if (__ARM_ARCH == 6)               // if ARMv6-M...
+    "  SUB           sp,sp,#(8*4)     \n" // make room for 8 registers r4-r11
+    "  MOV           r0,sp            \n" // r0 := temporary stack pointer
+    "  STMIA         r0!,{r4-r7}      \n" // save the low registers
+    "  MOV           r4,r8            \n" // move the high registers to low registers...
+    "  MOV           r5,r9            \n"
+    "  MOV           r6,r10           \n"
+    "  MOV           r7,r11           \n"
+    "  STMIA         r0!,{r4-r7}      \n" // save the high registers
+#else                               // ARMv7-M or higher
     "  PUSH          {r4-r11}          \n"
+#endif                              // ARMv7-M or higher
 
-    /*     OS_Current_Thread->sp = sp; */
-    "  LDR           r1,=OS_Current_Thread       \n"
+    /*     OS_curr->sp = sp; */
+    "  LDR           r1,=OS_curr       \n"
     "  LDR           r1,[r1,#0x00]     \n"
-    "  STR           sp,[r1,#0x00]     \n"
+    "  MOV           r0,sp             \n"
+    "  STR           r0,[r1,#0x00]     \n"
     /* } */
 
     "PendSV_restore:                   \n"
-    /* sp = OS_Next_Thread->sp; */
-    "  LDR           r1,=OS_Next_Thread       \n"
+    /* sp = OS_next->sp; */
+    "  LDR           r1,=OS_next       \n"
     "  LDR           r1,[r1,#0x00]     \n"
-    "  LDR           sp,[r1,#0x00]     \n"
+    "  LDR           r0,[r1,#0x00]     \n"
+    "  MOV           sp,r0             \n"
 
-    /* OS_Current_Thread = OS_Next_Thread; */
-    "  LDR           r1,=OS_Next_Thread       \n"
+    /* OS_curr = OS_next; */
+    "  LDR           r1,=OS_next       \n"
     "  LDR           r1,[r1,#0x00]     \n"
-    "  LDR           r2,=OS_Current_Thread       \n"
+    "  LDR           r2,=OS_curr       \n"
     "  STR           r1,[r2,#0x00]     \n"
 
     /* pop registers r4-r11 */
+#if (__ARM_ARCH == 6)               // if ARMv6-M...
+    "  MOV           r0,sp             \n" // r0 := top of stack
+    "  MOV           r2,r0             \n"
+    "  ADDS          r2,r2,#(4*4)      \n" // point r2 to the 4 high registers r7-r11
+    "  LDMIA         r2!,{r4-r7}       \n" // pop the 4 high registers into low registers
+    "  MOV           r8,r4             \n" // move low registers into high registers
+    "  MOV           r9,r5             \n"
+    "  MOV           r10,r6            \n"
+    "  MOV           r11,r7            \n"
+    "  LDMIA         r0!,{r4-r7}       \n" // pop the low registers
+    "  ADD           sp,sp,#(8*4)      \n" // remove 8 registers from the stack
+#else                               // ARMv7-M or higher
     "  POP           {r4-r11}          \n"
+#endif                              // ARMv7-M or higher
 
     /* __enable_irq(); */
     "  CPSIE         I                 \n"

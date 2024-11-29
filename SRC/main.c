@@ -1,95 +1,55 @@
 #include <stdint.h>
-#include "RTOS_Kernel.h"
-#include "under_the_hood.h"
-#include "under_the_hood_cfg.h"
+#include "RTOS_Kernal.h"
+#include "bsp.h"
 
-uint32_t stack_Thread1[40];
-OSThread Thread1;
-void main_Thread1() {
-    while (1) {
-        uint32_t volatile i;
-        for (i = 5000U; i != 0U; --i) {
-            DIO_Set(TEST_PIN_2);
-            DIO_Reset(TEST_PIN_2);
-
-        }
-        OS_delay(1U); /* block for 1 tick */
-    }
-}
-
-uint32_t stack_Thread2[40];
-OSThread Thread2;
-void main_Thread2() {
-    while (1) {
-        uint32_t volatile i;
-        for (i = 6000U; i != 0U; --i) {
-            DIO_Set(TEST_PIN_3);
-            DIO_Reset(TEST_PIN_3);
-        }
-        OS_delay(2U); /* block for 2 ticks */
-    }
-}
-
-uint32_t stack_Thread3[40];
-OSThread Thread3;
-void main_Thread3() {
-    while (1) {
-         uint32_t volatile i;
-        for (i = 15000U; i != 0U; --i) {
-            DIO_Set(TEST_PIN_4);
-            DIO_Reset(TEST_PIN_4);
-
-        }
-        OS_delay(4U); /* block for 4 ticks */
-    }
-}
-
-uint32_t stack_Thread4[40];
-OSThread Thread4;
-void main_Thread4() {
+uint32_t stack_blinky1[40];
+OSThread blinky1;
+void main_blinky1() {
     while (1) {
         uint32_t volatile i;
         for (i = 1500U; i != 0U; --i) {
-            DIO_Set(TEST_PIN_5);
-            DIO_Reset(TEST_PIN_5);
-
+            BSP_ledGreenOn();
+            BSP_ledGreenOff();
         }
-        OS_delay(5U); /* block for 5 tick */
+        OS_delay(3U); /* block for 1 tick */
+    }
+}
+
+uint32_t stack_blinky2[40];
+OSThread blinky2;
+void main_blinky2() {
+    while (1) {
+        uint32_t volatile i;
+        for (i = 9*1500U; i != 0U; --i) {
+            BSP_ledBlueOn();
+            BSP_ledBlueOff();
+        }
+        OS_delay(50U); /* block for 50 ticks */
     }
 }
 
 
-
+uint32_t stack_idleThread[40];
 
 int main() {
-    System_Init();
-    OS_init();
+    BSP_init();
+    OS_init(stack_idleThread, sizeof(stack_idleThread));
 
-    /* start Thread1  */
-    OSThread_start(&Thread1,
-                   1U, /* priority */
-                   &main_Thread1,
-                   stack_Thread1, sizeof(stack_Thread1));
+    /* start blinky1 thread */
+    OSThread_start(&blinky1,
+                   5U, /* priority */
+                   &main_blinky1,
+                   stack_blinky1, sizeof(stack_blinky1));
 
-    /* start Thread2  */
-    OSThread_start(&Thread2,
-                   2U, /* priority */
-                   &main_Thread2,
-                   stack_Thread2, sizeof(stack_Thread2));
+    /* start blinky2 thread */
+    OSThread_start(&blinky2,
+                   6U, /* priority */
+                   &main_blinky2,
+                   stack_blinky2, sizeof(stack_blinky2));
 
-    /* start Thread3  */
-    OSThread_start(&Thread3,
-                   3U, /* priority */
-                   &main_Thread3,
-                   stack_Thread3, sizeof(stack_Thread3));
-		
-		    /* start Thread4  */
-    OSThread_start(&Thread4,
-                   4U, /* priority */
-                   &main_Thread4,
-                   stack_Thread4, sizeof(stack_Thread4));
-									 
+
     /* transfer control to the RTOS to run the threads */
     OS_run();
 
+    //return 0;
 }

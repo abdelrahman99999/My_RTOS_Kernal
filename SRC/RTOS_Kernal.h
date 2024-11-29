@@ -1,6 +1,5 @@
 #ifndef __RTOS_KERNEL_H__
 #define __RTOS_KERNEL_H__
-#include <stdint.h>  
 
 /* Thread Control Block (TCB) */
 typedef struct {
@@ -10,9 +9,13 @@ typedef struct {
     /* ... other attributes associated with a thread */
 } OSThread;
 
+/*Thread handler pointer to Function*/
 typedef void (*OSThreadHandler)();
 
-void OS_init();
+void OS_init(void *stkSto, uint32_t stkSize);
+
+/* callback to handle the idle condition */
+void OS_onIdle(void);
 
 /* this function must be called with interrupts DISABLED */
 void OS_sched(void);
@@ -20,7 +23,7 @@ void OS_sched(void);
 /* transfer control to the RTOS to run the threads */
 void OS_run(void);
 
-/* delay */
+/* blocking delay */
 void OS_delay(uint32_t ticks);
 
 /* process all timeouts */
